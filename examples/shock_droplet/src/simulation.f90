@@ -259,8 +259,32 @@ contains
       Q(4)=(1.0_WP-VFeq)*(Peq+GammaG*PinfG)/(GammaG-1.0_WP)
       VF=VFeq
    end subroutine PT_relax
-   
-   
+
+   !> constant dynamic viscosity model
+   subroutine cst_dyn_visc(mu,visc,T)
+      implicit none
+      real(WP), dimension(:,:,:), intent(inout) :: mu       ! array to be populated 
+      real(WP), intent(in), optional :: visc                ! dynamic viscosity value
+      real(WP), dimension(:,:,:), intent(in), optional :: T ! temperature array (not used here, only here for interface compatibility)
+      mu(:,:,:) = visc
+   end subroutine cst_dyn_visc
+
+   !> sutherland model for viscosity
+   subroutine sutherland_air(mu,visc,T)
+      implicit none
+      integer :: i,j,k
+      real(WP), dimension(:,:,:), intent(inout) :: mu       ! array to be populated 
+      real(WP), intent(in), optional :: visc                ! dynamic viscosity value
+      real(WP), dimension(:,:,:), intent(in), optional :: T ! temperature array (only declared optional for interface compatibility)
+      real(WP), parameter :: mu0=1.716e-5_WP                ! [Pa*s] https://www.cfd-online.com/Wiki/Sutherland%27s_law 
+      real(WP) :: T0=273.15_WP                              ! [K] reference temperature
+      real(WP) :: S=110.4_WP                                ! [K] sutherland constant for air
+      do k=lbound(mu,3),ubound(mu,3); do j=lbound(mu,2),ubound(mu,2); do i=lbound(mu,1),ubound(mu,1)
+         ! coefficients come from normalizing each temperature term by T0 (T0/T0 + S/T0 = 1.4042, S/T0 = 0.4042) https://pubs.aip.org/aip/pof/article/36/5/055146/3294212/Comparison-of-high-order-numerical-methodologies
+         mu(i,j,k) = visc*(1.4042*(T(i,j,k))**1.5)/(T(i,j,k)+0.4042) ! nondim
+      end do; end do; end do
+   end subroutine sutherland_air
+
    !> Solver initialization
    subroutine simulation_init
       implicit none
@@ -305,7 +329,7 @@ contains
          CvG=(p1+PinfG)/(rho1*(GammaG-1.0_WP))
          ! Viscous parameters
          call param_read('Gas Reynolds number',ReG); viscG=rho1*1.0_WP*u2/ReG 
-         call param_read('Viscosity ratio',visc_ratio); viscL=visc_ratio*viscG
+         call param_read('Viscosity ratio',visc_ratio); viscL=visc_ratio*viscG/rho_ratio
          ! Output case info
          if (amRoot) then
             write(message,'("[Liquid EOS] => Gamma=",es12.5)') GammaL; call log(message)
@@ -417,8 +441,15 @@ contains
          sd%fs%getPG=>get_PG; sd%fs%getCG=>get_CG; sd%fs%getSG=>get_SG; sd%fs%getTG=>get_TG
          ! We need to transfer our viscosities explicitly...
          sd%cst_viscL=viscL; sd%cst_viscG=viscG
+         ! set viscosity model for liquid and gas respectivley
+         sd%visc_modelL=>cst_dyn_visc
+         sd%visc_modelG=>cst_dyn_visc
+         !sd%visc_modelG=>sutherland_air
+         ! set initial viscosity
+         call sd%visc_modelL(mu=sd%dynviscL,visc=viscL,T=sd%fs%TL)
+         call sd%visc_modelG(mu=sd%dynviscG,visc=viscG,T=sd%fs%TG)
       end block setup_sd
-      
+
       ! Generate initial conditions for shock-drop problem
       initialize_sd: block
          use irl_fortran_interface, only: setNumberOfPlanes,setPlane
@@ -489,6 +520,11 @@ contains
          ff%fs%getP=>get_PG; ff%fs%getC=>get_CG; ff%fs%getS=>get_SG; ff%fs%getT=>get_TG
          ! We need to transfer our viscosity explicitly...
          ff%cst_visc=viscG
+         ! set viscosity model
+         ff%visc_model=>cst_dyn_visc
+         !ff%visc_model=>sutherland_air
+         ! set our initial viscosities
+         call ff%visc_model(mu=ff%dynvisc,visc=viscG,T=ff%fs%T)
       end block setup_ff
       
       ! Generate initial conditions for far-field shock problem
@@ -713,6 +749,9 @@ contains
          sdnew%cst_viscL=sd%cst_viscL; sdnew%cst_viscG=sd%cst_viscG
          ! Inform sdnew's timetracker of our current time, but leave n unchanged to make remeshing obvious
          sdnew%time%t=time%t
+         ! re set our viscosity model for new config
+         sdnew%visc_modelL=>sd%visc_modelL
+         sdnew%visc_modelG=>sd%visc_modelG
       end block setup_sdnew
       
       ! Create new couplers
@@ -721,7 +760,7 @@ contains
          allocate(sdnew2ff); sdnew2ff=coupler(src_grp=group,dst_grp=group,name='sd2ff'); call sdnew2ff%set_src(sdnew%cfg); call sdnew2ff%set_dst(ff%cfg); call sdnew2ff%initialize()
          allocate(ff2sdnew); ff2sdnew=coupler(src_grp=group,dst_grp=group,name='ff2sd'); call ff2sdnew%set_src(ff%cfg); call ff2sdnew%set_dst(sdnew%cfg); call ff2sdnew%initialize()
       end block setup_new_couplers
-      
+
       ! Initialize all sdnew to gas including in ghost cells
       initialize_to_gas: block
          use irl_fortran_interface, only: setNumberOfPlanes,setPlane
@@ -793,7 +832,7 @@ contains
          ! Compute local Mach number
          sdnew%Ma=sqrt(sdnew%Ui**2+sdnew%Vi**2+sdnew%Wi**2)/sdnew%fs%C
       end block initialize_sdnew_from_sd
-      
+
       ! Finally, transfer allocation
       transfer_allocation: block
          ! Finalize and free up couplers, point to new ones
@@ -802,7 +841,7 @@ contains
          ! Finalize and free up sd, point to new one
          call sd%finalize(); deallocate(sd); sd=>sdnew
       end block transfer_allocation
-      
+
       ! Monitor mesh size
       call sd%meshfile%write()
       

@@ -25,6 +25,9 @@ module ffshock_class
       !> Flow solver
       type(spcomp) :: fs        !< Single-phase compressible solver
       type(timetracker) :: time !< Time info
+
+      !> viscosity model
+      procedure(visc_type), pointer, nopass :: visc_model=>NULL()
       
       !> Add an LPT solver
       type(lpt), public :: lp
@@ -44,6 +47,9 @@ module ffshock_class
       
       !> Constant phasic kinematic viscosity
       real(WP) :: cst_visc
+
+      !> dynamic viscosity
+      real(WP), dimension(:,:,:), allocatable :: dynvisc
       
    contains
       procedure :: initialize                      !< Initialize farfield shock simulation
@@ -54,6 +60,17 @@ module ffshock_class
       procedure, private :: prepare_viscosities    !< Prepare viscosities
       procedure, private :: apply_bconds           !< Apply boundary conditions
    end type ffshock
+
+   abstract interface 
+      !> viscosity model type
+      subroutine visc_type(mu,visc,T)
+         import :: WP
+         implicit none
+         real(WP), dimension(:,:,:), intent(inout) :: mu       ! dynamic viscosity array
+         real(WP), intent(in), optional :: visc                ! dynamic viscosity (for constant viscosity models)
+         real(WP), dimension(:,:,:), intent(in), optional :: T ! temperature for sutherlands model
+      end subroutine visc_type
+   end interface
    
 contains
    
@@ -126,6 +143,7 @@ contains
          allocate(this%Vi(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
          allocate(this%Wi(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
          allocate(this%Ma(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
+         allocate(this%dynvisc(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
          ! LPT coupling arrays
          allocate(this%stressx(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
          allocate(this%stressy(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
@@ -146,9 +164,12 @@ contains
          call this%ens_out%add_scalar('RHO',this%fs%Q(:,:,:,1))
          call this%ens_out%add_scalar('I',this%fs%I)
          call this%ens_out%add_scalar('P',this%fs%P)
+         call this%ens_out%add_scalar('T',this%fs%T)
          call this%ens_out%add_scalar('Mach',this%Ma)
-         call this%ens_out%add_scalar('beta',this%beta)
-         call this%ens_out%add_scalar('visc',this%visc)
+         call this%ens_out%add_scalar('phys_visc',this%dynvisc)  ! physical dynamic viscosity
+         call this%ens_out%add_scalar('beta',this%beta)          ! viscosity add for shock capturing (LAD)
+         call this%ens_out%add_scalar('visc',this%visc)          ! LES viscosity
+         call this%ens_out%add_scalar('total_visc',this%fs%visc) ! total viscosity (physical + LES + LAD)
          ! Add lpt output
          call this%ens_out%add_particle('spray',this%pmesh)
       end block create_ensight
@@ -351,13 +372,16 @@ contains
    subroutine prepare_viscosities(this)
       implicit none
       class(ffshock), intent(inout) :: this
+      integer :: i,j,k
       real(WP), parameter :: Cb2v=0.1_WP
+      ! get physical viscosity
+      call this%visc_model(mu=this%dynvisc,visc=this%cst_visc,T=this%fs%T)
       ! Get LAD
       call this%fs%get_viscartif(dt=this%time%dt,beta=this%beta); this%fs%BETA=this%fs%Q(:,:,:,1)*(this%beta              )
       ! Get eddy viscosity
       call this%fs%get_vreman   (dt=this%time%dt,visc=this%visc); this%fs%VISC=this%fs%Q(:,:,:,1)*(this%visc+this%cst_visc)
-      ! Try adding BETA to visc
-      this%fs%VISC=this%fs%VISC+Cb2v*this%fs%BETA
+      ! Try adding BETA to 
+      this%fs%VISC=this%fs%VISC+Cb2v*this%fs%BETA+this%dynvisc ! beta and LES kinematic viscosities are already multiplied by density (see above)
    end subroutine prepare_viscosities
    
    
