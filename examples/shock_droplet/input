@@ -9,7 +9,9 @@ Sound speed ratio : 4.3
 Shock Mach number : 5.12
 Shock location :   -0.6
 !------- viscous ---------
+! JR to insert definition
 Gas Reynolds number : 1e5
+! JR to insert defintion
 Viscosity ratio :     58.3
 
 # Maximum simulation time
